@@ -1,18 +1,20 @@
 #![feature(type_alias_impl_trait)]
 
 use std::f32::consts::TAU;
+use std::mem;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "server")]
 mod server;
 
+pub use client::{run_client, NoopRenderer, PathfinderEventLoop};
 pub use server::run_server;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Tank {
+pub struct Tank {
     player: Idx<'static, Player>,
     position: (f32, f32),
     angle: f32,
@@ -40,11 +42,12 @@ enum Drive {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Input {
+pub struct Input {
     drive: Option<Drive>,
     rotate: Option<Turn>,
     turret: Option<Turn>,
     fire: bool,
+    seq: usize,
 }
 
 impl Tank {
@@ -182,8 +185,22 @@ struct StableList<E> {
 }
 
 impl<E> StableList<E> {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.list.len()
+    }
+    pub fn push(&mut self, value: E) -> Idx<'static, E> {
+        let i = if let Some((i, x)) = self.list.iter_mut().enumerate().find(|(i, x)| x.is_none()) {
+            *x = Some(value);
+            i
+        } else {
+            let i = self.list.len();
+            self.list.push(Some(value));
+            i
+        };
+        Idx(i, Default::default())
+    }
+    pub fn remove(&mut self, idx: &Idx<'static, E>) -> Option<E> {
+        mem::take(&mut self.list[idx.0])
     }
 }
 impl<E> From<Vec<Option<E>>> for StableList<E> {
@@ -217,7 +234,7 @@ impl<E> std::ops::IndexMut<Idx<'static, E>> for StableList<E> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Bullet {
+pub struct Bullet {
     position: (f32, f32),
     angle: f32,
     damage: i32,
@@ -249,12 +266,16 @@ struct Player {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GameState {
-    players: StableList<Player>,
-    tanks: StableList<Tank>,
-    tank_bullets: StableList<Vec<Bullet>>,
-    bullets: ElementList<Bullet>,
+    pub(crate) players: StableList<Player>,
+    pub(crate) tanks: StableList<Tank>,
+    pub(crate) tank_bullets: StableList<Vec<Bullet>>,
+    pub(crate) bullets: ElementList<Bullet>,
     collision: CollisionMap<Collision>,
+    time: Time,
 }
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct Time(pub u64);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CollisionMap<T> {
@@ -332,6 +353,7 @@ impl GameState {
             tank_bullets: StableList::from(vec![]),
             bullets: ElementList::from(vec![]),
             collision: CollisionMap::new(),
+            time: Time(0),
         }
     }
     pub fn tick(&self) -> Self {
@@ -426,6 +448,7 @@ impl GameState {
             tank_bullets: new_tank_bullets.into(),
             bullets: ElementList { list: new_bullets },
             collision,
+            time: Time(self.time.0.wrapping_add(1)),
         }
     }
     fn collide(&self, position: (f32, f32)) -> Option<Collision> {
