@@ -1,4 +1,5 @@
-#![feature(type_alias_impl_trait)]
+#![feature(min_type_alias_impl_trait)]
+#![feature(array_chunks)]
 
 use std::f32::consts::TAU;
 use std::mem;
@@ -10,7 +11,13 @@ mod client;
 #[cfg(feature = "server")]
 mod server;
 
-pub use client::{run_client, NoopRenderer, PathfinderEventLoop};
+#[cfg(all(feature = "pathfinder_backend", feature = "client"))]
+pub use client::PathfinderEventLoop;
+#[cfg(all(feature = "pixels_backend", feature = "client"))]
+pub use client::PixelsEventLoop;
+#[cfg(feature = "client")]
+pub use client::{run_client, NoopRenderer};
+#[cfg(feature = "server")]
 pub use server::run_server;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,11 +96,11 @@ impl Tank {
             None => self.position,
         };
 
-        let position = if let Some(_) = state.collide(position) {
-            self.position
-        } else {
-            position
-        };
+        //let position = if let Some(_) = state.collide(position) {
+        //    self.position
+        //} else {
+        //    position
+        //};
         let tank = Tank {
             player: self.player,
             position,
@@ -210,14 +217,14 @@ impl<E> From<Vec<Option<E>>> for StableList<E> {
 }
 
 impl<'a, E: 'static> std::iter::IntoIterator for &'a StableList<E> {
-    type Item = (Idx<'static, E>, &'a E);
+    type Item = (Idx<'static, E>, Option<&'a E>);
     type IntoIter = impl Iterator<Item = Self::Item>;
     fn into_iter(self) -> Self::IntoIter {
         self.list
             .iter()
             .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
-            .map(|(i, t)| (Idx(i, Default::default()), t))
+            //.filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
+            .map(|(i, t)| (Idx(i, Default::default()), t.as_ref()))
     }
 }
 
@@ -368,7 +375,15 @@ impl GameState {
             .tanks
             .into_iter()
             .zip(&self.tank_bullets)
-            .map(|((tank_idx, tank), (_, bullets))| (tank_idx, tank.tick(&self, &bullets)))
+            .filter_map(|((tank_idx, tank), (b_idx, b))| {
+                tank.map(|tank| ((tank_idx, tank), (b_idx, b)))
+            })
+            .map(|((tank_idx, tank), (_, bullets))| {
+                (
+                    tank_idx,
+                    tank.tick(&self, bullets.map(|b| b.as_ref()).unwrap_or(&[])),
+                )
+            })
             .collect();
         let bullet_updates: Vec<_> = self
             .bullets

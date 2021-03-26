@@ -12,7 +12,7 @@ use tokio::sync::{oneshot, watch};
 use warp::ws::{self, WebSocket};
 use warp::Filter;
 
-use crate::{GameState, Idx, Input, Player};
+use crate::{GameState, Idx, Input, Player, Tank};
 
 struct SerializedGameState {
     bytes: Vec<u8>,
@@ -36,7 +36,9 @@ impl Server {
     fn tick<I: Iterator<Item = (Idx<'static, Player>, Input)>>(&mut self, inputs: I) {
         // take player inputs
         for (player, input) in inputs {
-            self.last_state.players[player].as_mut().unwrap().input = input;
+            if let Some(player) = self.last_state.players[player].as_mut() {
+                player.input = input;
+            }
         }
 
         // tick gamestate
@@ -79,12 +81,26 @@ pub fn run_server() {
                 input: Default::default(),
             });
             send.send(idx).unwrap();
+            server.last_state.tanks.push(Tank {
+                player: idx,
+                position: (0.0, 0.0),
+                health: 100,
+                turret_angle: 0.0,
+                angle: 0.0,
+            });
         }
         for idx in inputs.disconnections.iter() {
             // TODO
             server.last_state.players.remove(idx);
         }
         server.tick(inputs.inputs.into_iter());
+        if server.last_state.time.0 % 60 == 0 {
+            println!("TANKS {:?}", server.last_state.tanks.list);
+            println!("TANK_BULLETS: {:?}", server.last_state.tank_bullets.list);
+            //println!("BULLETS: {:?}", server.last_state.bullets.list);
+            println!("PLAYERS {:?}", server.last_state.players.list);
+            println!("TIME: {:?}", server.last_state.time);
+        }
         let ser = Arc::new(serialize(&server.last_state));
         while let Err(_) = send.send(ser.clone()) {}
         // delay to 60 ups

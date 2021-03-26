@@ -10,7 +10,7 @@ edition = "2018"
 rstar = { version = "0.8.2", features = ["serde"] }
 tokio = {version = "1.4", features = ["sync", "rt", "rt-multi-thread", "time"]}
 parking_lot = "0.11"
-warp = { version = "0.3", features = ["websocket"] }
+warp = { version = "0.3", features = ["websocket"], optional = true }
 tokio-tungstenite = "0.14"
 futures = "0.3.13"
 serde = {version = "1.0.124", features = ["derive"]}
@@ -21,8 +21,19 @@ pathfinder_renderer = {version = "0.5.0", optional = true}
 pathfinder_resources = {version = "0.5.0", optional = true}
 glutin = {version = "0.26", optional = true}
 gl = {version = "0.14", optional = true}
+pixels = {version = "0.2", optional = true}
+winit = {version = "0.24", optional = true}
+winit_input_helper = { version = "0.9", optional = true}
+raqote = { version = "0.7.4", optional = true }
+euclid = { version = "0.20"}
 
 [features]
-server = []
-client = ["pathfinder_canvas", "pathfinder_gl", "pathfinder_resources", "pathfinder_renderer", "glutin", "gl"]
-default = ["server", "client"]
+server = ["warp"]
+pixels_backend = ["pixels", "winit", "winit_input_helper", "raqote"]
+pathfinder_backend = ["pathfinder_canvas", "pathfinder_gl", "pathfinder_resources", "pathfinder_renderer", "glutin", "gl", "pixels"]
+client = []
+client_default = ["client", "pixels_backend"]
+default = ["server", "client_default"]
+
+[patch.crates-io]
+pixels = { git = "https://github.com/parasyte/pixels" }

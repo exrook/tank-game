@@ -10,8 +10,14 @@ use tokio_tungstenite::tungstenite;
 
 use rmp_serde;
 
+#[cfg(feature = "pathfinder_backend")]
 mod pathfinder;
+#[cfg(feature = "pathfinder_backend")]
 pub use pathfinder::PathfinderEventLoop;
+#[cfg(feature = "pixels_backend")]
+mod pixels;
+#[cfg(feature = "pixels_backend")]
+pub use self::pixels::PixelsEventLoop;
 
 pub fn run_client<EL: EventLoop>() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -64,13 +70,16 @@ fn render_loop<R: Renderer>(mut renderer: R, mut recv_state: watch::Receiver<Gam
     let mut state = recv_state.borrow().clone();
     loop {
         if let Some(res) = recv_state.changed().now_or_never() {
-            res.unwrap();
+            if let Err(_) = res {
+                break;
+            }
             state = recv_state.borrow().clone();
         }
         // Get current state
         draw_state(&state, &mut renderer);
         renderer.present_frame();
     }
+    println!("Render loop ended");
 }
 
 //struct Client {
@@ -115,10 +124,10 @@ async fn client_loop(
             let recv_loop = async {
                 // need async block type ascription to remove this
                 if false {
-                    return Ok::<(), ()>(());
+                    return Ok::<(), _>(());
                 }
                 loop {
-                    let mut msg = stream.next().await.unwrap().unwrap();
+                    let mut msg = stream.next().await.unwrap().map_err(|_| ())?;
                     // Attempt to drain any states that may be buffered
                     while let Some(next_msg) = stream.next().now_or_never() {
                         msg = next_msg.unwrap().unwrap()
@@ -165,7 +174,9 @@ fn get_input(seq: u64) -> Input {
 
 fn draw_state(state: &GameState, r: &mut impl Renderer) {
     for (_i, tank) in &state.tanks {
-        r.draw_tank(tank)
+        if let Some(tank) = tank {
+            r.draw_tank(tank)
+        }
     }
     for (_i, bullet) in &state.bullets {
         r.draw_bullet(bullet)
