@@ -6,11 +6,17 @@ use std::mem;
 
 use serde::{Deserialize, Serialize};
 
+use euclid::{Angle, Length, Scale};
+
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "server")]
 mod server;
 
+#[cfg(all(feature = "druid_backend", feature = "client"))]
+pub use client::DruidEventLoop;
+#[cfg(all(feature = "minifb_backend", feature = "client"))]
+pub use client::MinifbEventLoop;
 #[cfg(all(feature = "pathfinder_backend", feature = "client"))]
 pub use client::PathfinderEventLoop;
 #[cfg(all(feature = "pixels_backend", feature = "client"))]
@@ -20,13 +26,29 @@ pub use client::{run_client, NoopRenderer};
 #[cfg(feature = "server")]
 pub use server::run_server;
 
+/// Gm = Game meter
+pub enum Gm {}
+/// 1 Pixel
+pub type Pixel = euclid::UnknownUnit;
+
+type Point2D<T = i64, U = Gm> = euclid::Point2D<T, U>;
+type Size2D<T = i64, U = Gm> = euclid::Size2D<T, U>;
+type Vector2D<T = i64, U = Gm> = euclid::Vector2D<T, U>;
+type Box2D<T = i64, U = Gm> = euclid::Box2D<T, U>;
+type Rotation2D<T = f32, Src = Gm, Dst = Gm> = euclid::Rotation2D<T, Src, Dst>;
+type Transform2D<T = f32, Src = Gm, Dst = Gm> = euclid::Rotation2D<T, Src, Dst>;
+
+pub const GM_ONE_PIXEL: i64 = 10000;
+pub const GM_SCALE: Scale<i64, Pixel, Gm> = Scale::new(GM_ONE_PIXEL);
+const UPDATES_PER_SECOND: i64 = 60;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tank {
     player: Idx<'static, Player>,
-    position: (f32, f32),
-    angle: f32,
-    turret_angle: f32,
-    health: i32,
+    position: Point2D,
+    angle: Angle<f32>,
+    turret_angle: Angle<f32>,
+    health: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,15 +79,66 @@ pub struct Input {
     seq: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct TankHitbox {
+    center: Point2D,
+    angle: Angle<f32>,
+}
+
+impl TankHitbox {
+    const TANK_SIZE: i64 = 20 * GM_ONE_PIXEL;
+    const ENVELOPE_LIMIT: i64 = (Self::TANK_SIZE as f64 * std::f64::consts::SQRT_2) as i64;
+    fn distance_relative(&self, relative_vec: &Vector2D) -> i64 {
+        let aabb = Box2D::<_, Gm>::zero().inflate(Self::TANK_SIZE, Self::TANK_SIZE);
+        rstar::AABB::from_corners(aabb.min, aabb.max).distance_2(
+            &Rotation2D::new(self.angle)
+                .inverse()
+                .transform_vector(relative_vec.to_f32())
+                .to_i64()
+                .to_point(),
+        )
+    }
+    //pub fn box(&self) -> (Box2D, Rotation2D, Translation2D) {
+    //    (Box2D::zero()
+    //        .inflate(Self::ENVELOPE_LIMIT, Self::ENVELOPE_LIMIT),
+    //    Rotation2D::new(self.angle),
+    //    Translation2D::new(self.point.to_vector())
+    //}
+}
+
+impl rstar::RTreeObject for TankHitbox {
+    type Envelope = rstar::AABB<Point2D>;
+    fn envelope(&self) -> Self::Envelope {
+        let aabb = Box2D::zero()
+            .translate(self.center.to_vector())
+            .inflate(Self::ENVELOPE_LIMIT, Self::ENVELOPE_LIMIT);
+        rstar::AABB::from_corners(aabb.min, aabb.max)
+    }
+}
+
+impl rstar::PointDistance for TankHitbox {
+    fn distance_2(&self, point: &Point2D) -> i64 {
+        self.distance_relative(&(*point - self.center))
+    }
+    fn contains_point(&self, point: &Point2D) -> bool {
+        let vec = *point - self.center;
+        if vec.square_length() > (Self::ENVELOPE_LIMIT * Self::ENVELOPE_LIMIT * 2) {
+            false
+        } else {
+            self.distance_relative(&vec) <= 0
+        }
+    }
+}
+
 impl Tank {
     fn tick(&self, state: &GameState, bullets: &[Bullet]) -> TankUpdate {
         let hp = match bullets.into_iter().try_fold(self.health, |hp, bullet| {
             let hp = hp - bullet.damage;
-            if hp <= 0 {
-                Err(bullet.player)
-            } else {
-                Ok(hp)
-            }
+            //if hp <= 0 {
+            //    Err(bullet.player)
+            //} else {
+            Ok(hp)
+            //}
         }) {
             Err(player) => return TankUpdate::Dead(player),
             Ok(hp) => hp,
@@ -75,27 +148,39 @@ impl Tank {
             Some(s) => s,
         }
         .input;
-        const TURN_RATE: f32 = TAU * (0.5 / 60.0);
+        const TURN_RATE: Angle<f32> = Angle {
+            radians: TAU * (0.5 / UPDATES_PER_SECOND as f32),
+        };
         let angle = (self.angle
             + match input.rotate {
                 Some(Turn::Left) => TURN_RATE,
                 Some(Turn::Right) => -TURN_RATE,
-                None => 0.0,
+                None => Angle::zero(),
             })
-            % TAU;
+        .positive();
+        //% TAU;
         let turret_angle = (self.turret_angle
             + match input.turret {
                 Some(Turn::Left) => TURN_RATE,
                 Some(Turn::Right) => -TURN_RATE,
-                None => 0.0,
+                None => Angle::zero(),
             })
-            % TAU;
-        let position = match input.drive {
-            Some(Drive::Forward) => (self.position.0 + angle.cos(), self.position.1 + angle.sin()),
-            Some(Drive::Reverse) => (self.position.0 - angle.cos(), self.position.1 - angle.sin()),
-            None => self.position,
-        };
+        .positive();
+        //% TAU;
+        let position = self.position
+            + match input.drive {
+                Some(Drive::Forward) => {
+                    (Vector2D::from_angle_and_length(angle, 280.0) * GM_SCALE.cast()).to_i64()
+                        / UPDATES_PER_SECOND
+                }
+                Some(Drive::Reverse) => {
+                    (-Vector2D::from_angle_and_length(angle, 280.0) * GM_SCALE.cast()).to_i64()
+                        / UPDATES_PER_SECOND
+                }
+                None => Vector2D::zero(),
+            };
 
+        // TODO
         //let position = if let Some(_) = state.collide(position) {
         //    self.position
         //} else {
@@ -112,22 +197,23 @@ impl Tank {
             true => TankUpdate::Fire(
                 tank,
                 Bullet {
-                    position: (
-                        self.position.0 + turret_angle.cos(),
-                        self.position.1 + turret_angle.sin(),
-                    ),
+                    position: self.position
+                        + Vector2D::from_angle_and_length(turret_angle, 40.0).to_i64() * GM_SCALE,
                     angle: self.turret_angle,
                     damage: 10,
                     player: self.player,
+                    birth: state.time,
                 },
             ),
             false => TankUpdate::Alive(tank),
         }
     }
-}
-
-struct TankList {
-    tanks: Vec<(Tank, Vec<Bullet>)>,
+    fn hitbox(&self) -> TankHitbox {
+        TankHitbox {
+            center: self.position,
+            angle: self.angle,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,18 +328,24 @@ impl<E> std::ops::IndexMut<Idx<'static, E>> for StableList<E> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bullet {
-    position: (f32, f32),
-    angle: f32,
-    damage: i32,
+    position: Point2D,
+    angle: Angle<f32>,
+    damage: i64,
+    birth: Time,
     player: Idx<'static, Player>,
 }
 
 impl Bullet {
     fn tick(&self, state: &GameState) -> BulletUpdate {
-        let position = (
-            self.position.0 + self.angle.cos(),
-            self.position.1 + self.angle.sin(),
-        );
+        let position = self.position
+            + (Vector2D::from_angle_and_length(self.angle, 1000.0) * GM_SCALE.cast()).to_i64()
+                / UPDATES_PER_SECOND;
+        if state.time.0 - self.birth.0 > 60 * 10 {
+            return BulletUpdate::Dead;
+        }
+        //if position.square_length() > (1000000 * 1000) {
+        //    return BulletUpdate::Dead;
+        //}
         match state.collide(position) {
             Some(Collision::Tank(tank)) => BulletUpdate::Hit(tank),
             Some(Collision::Arena) => BulletUpdate::Dead,
@@ -277,67 +369,58 @@ pub struct GameState {
     pub(crate) tanks: StableList<Tank>,
     pub(crate) tank_bullets: StableList<Vec<Bullet>>,
     pub(crate) bullets: ElementList<Bullet>,
-    collision: CollisionMap<Collision>,
+    collision: CollisionMap,
     time: Time,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Time(pub u64);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct CollisionMap<T> {
-    rtree: rstar::RTree<Hitbox<T>>,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Hitbox<T> {
-    rect: rstar::primitives::Rectangle<[f32; 2]>,
-    element: T,
+enum Hitbox {
+    Tank(TankHitbox, Idx<'static, Tank>),
 }
 
-impl<T> rstar::RTreeObject for Hitbox<T> {
-    type Envelope = rstar::AABB<[f32; 2]>;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CollisionMap {
+    rtree: rstar::RTree<Hitbox>,
+}
+
+impl rstar::RTreeObject for Hitbox {
+    type Envelope = rstar::AABB<Point2D>;
     fn envelope(&self) -> Self::Envelope {
-        self.rect.envelope()
+        match &self {
+            Self::Tank(hitbox, idx) => hitbox.envelope(),
+        }
     }
 }
-impl<T> rstar::PointDistance for Hitbox<T> {
-    fn distance_2(&self, point: &[f32; 2]) -> f32 {
-        self.rect.distance_2(point)
+impl rstar::PointDistance for Hitbox {
+    fn distance_2(&self, point: &Point2D) -> i64 {
+        match &self {
+            Self::Tank(hitbox, idx) => hitbox.distance_2(point),
+        }
     }
-    fn contains_point(&self, point: &[f32; 2]) -> bool {
-        self.rect.contains_point(point)
+    fn contains_point(&self, point: &Point2D) -> bool {
+        match &self {
+            Self::Tank(hitbox, idx) => hitbox.contains_point(point),
+        }
     }
-    fn distance_2_if_less_or_equal(&self, point: &[f32; 2], max_distance_2: f32) -> Option<f32> {
-        self.rect.distance_2_if_less_or_equal(point, max_distance_2)
+    fn distance_2_if_less_or_equal(&self, point: &Point2D, max_distance_2: i64) -> Option<i64> {
+        match &self {
+            Self::Tank(hitbox, idx) => hitbox.distance_2_if_less_or_equal(point, max_distance_2),
+        }
     }
 }
 
-impl<T> CollisionMap<T> {
-    fn add(&mut self, position: (f32, f32), size: (f32, f32), element: T) {
-        let c1 = [position.0 + (size.0 / 2.0), position.1 + (size.1 / 2.0)];
-        let c2 = [position.0 - (size.0 / 2.0), position.1 - (size.1 / 2.0)];
-        self.rtree.insert(Hitbox {
-            rect: rstar::primitives::Rectangle::from_corners(c1, c2),
-            element,
-        });
+impl CollisionMap {
+    fn add(&mut self, element: Hitbox) {
+        self.rtree.insert(element);
     }
-    fn remove(&mut self, position: (f32, f32), size: (f32, f32), element: T) -> Option<T>
-    where
-        T: PartialEq,
-    {
-        let c1 = [position.0 + (size.0 / 2.0), position.1 + (size.1 / 2.0)];
-        let c2 = [position.0 - (size.0 / 2.0), position.1 - (size.1 / 2.0)];
-        let hitbox = Hitbox {
-            rect: rstar::primitives::Rectangle::from_corners(c1, c2),
-            element,
-        };
-        self.rtree.remove(&hitbox).map(|x| x.element)
+    fn remove(&mut self, element: Hitbox) -> Option<Hitbox> {
+        self.rtree.remove(&element)
     }
-    fn collide(&self, position: (f32, f32)) -> Option<&T> {
-        self.rtree
-            .locate_at_point(&[position.0, position.1])
-            .map(|h| &h.element)
+    fn collide(&self, position: Point2D) -> Option<&Hitbox> {
+        self.rtree.locate_at_point(&position)
     }
     fn new() -> Self {
         CollisionMap {
@@ -404,13 +487,13 @@ impl GameState {
                     );
                 }
                 TankUpdate::Alive(tank) => {
-                    if tank.position != self.tanks[tank_idx].as_ref().unwrap().position {
+                    if tank.hitbox() != self.tanks[tank_idx].as_ref().unwrap().hitbox() {
                         moved_tanks.push(tank_idx);
                     }
                     new_tanks[tank_idx] = Some(tank);
                 }
                 TankUpdate::Fire(tank, bullet) => {
-                    if tank.position != self.tanks[tank_idx].as_ref().unwrap().position {
+                    if tank.hitbox() != self.tanks[tank_idx].as_ref().unwrap().hitbox() {
                         moved_tanks.push(tank_idx);
                     }
                     new_tanks[tank_idx] = Some(tank);
@@ -439,23 +522,20 @@ impl GameState {
 
         // reduce
         for tank in removed_tanks {
-            collision.remove(
-                self.tanks[tank].as_ref().unwrap().position,
-                (2.0, 2.0),
-                Collision::Tank(tank),
-            );
+            let a = collision.remove(Hitbox::Tank(
+                self.tanks[tank].as_ref().unwrap().hitbox(),
+                tank,
+            ));
         }
         for tank_idx in moved_tanks {
-            collision.remove(
-                self.tanks[tank_idx].as_ref().unwrap().position,
-                (2.0, 2.0),
-                Collision::Tank(tank_idx),
-            );
-            collision.add(
-                new_tanks[tank_idx].as_ref().unwrap().position,
-                (2.0, 2.0),
-                Collision::Tank(tank_idx),
-            );
+            let a = collision.remove(Hitbox::Tank(
+                self.tanks[tank_idx].as_ref().unwrap().hitbox(),
+                tank_idx,
+            ));
+            collision.add(Hitbox::Tank(
+                new_tanks[tank_idx].as_ref().unwrap().hitbox(),
+                tank_idx,
+            ));
         }
         Self {
             players: new_players,
@@ -466,8 +546,14 @@ impl GameState {
             time: Time(self.time.0.wrapping_add(1)),
         }
     }
-    fn collide(&self, position: (f32, f32)) -> Option<Collision> {
-        self.collision.collide(position).cloned()
+    fn collide(&self, position: Point2D) -> Option<Collision> {
+        if let Some(h) = self.collision.collide(position).cloned() {
+            Some(match h {
+                Hitbox::Tank(h, tank_idx) => Collision::Tank(tank_idx),
+            })
+        } else {
+            None
+        }
     }
 }
 

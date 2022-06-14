@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::{try_join, SinkExt, StreamExt};
 
 use parking_lot::Mutex;
 
 use tokio::sync::{oneshot, watch};
+
+use euclid::{Angle, Box2D, Length, Point2D, Size2D, Vector2D};
 
 use warp::ws::{self, WebSocket};
 use warp::Filter;
@@ -60,20 +63,25 @@ pub struct PlayerInput {
 }
 
 pub fn run_server() {
+    let addr = std::env::args()
+        .skip(1)
+        .next()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(([0, 0, 0, 0], 8999).into());
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     let guard = rt.enter();
     let mut server = Server::new();
     let (send, recv) = watch::channel(Arc::new(serialize(&server.last_state)));
     let inputs = Arc::new(Mutex::new(PlayerInput::default()));
     let server_input = inputs.clone();
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
-    rt.spawn(ws_server(
-        SocketAddr::from(([0, 0, 0, 0], 8998)),
-        server_input.clone(),
-        recv,
-    ));
+    let mut interval = tokio::time::interval(Duration::from_secs(1) / 60);
+    rt.spawn(ws_server(addr, server_input.clone(), recv));
+    let mut instant = Instant::now();
+    let mut sum = Duration::new(0, 0);
     loop {
         // get inputs
+        let loop_time = Instant::now();
         let inputs = mem::take(&mut *server_input.lock());
         for send in inputs.new_connections {
             let idx = server.last_state.players.push(Player {
@@ -83,10 +91,10 @@ pub fn run_server() {
             send.send(idx).unwrap();
             server.last_state.tanks.push(Tank {
                 player: idx,
-                position: (0.0, 0.0),
+                position: Point2D::zero(),
                 health: 100,
-                turret_angle: 0.0,
-                angle: 0.0,
+                turret_angle: Angle::zero(),
+                angle: Angle::zero(),
             });
         }
         for idx in inputs.disconnections.iter() {
@@ -95,6 +103,11 @@ pub fn run_server() {
         }
         server.tick(inputs.inputs.into_iter());
         if server.last_state.time.0 % 60 == 0 {
+            let new_instant = Instant::now();
+            println!("FPS: {}", 60.0 / (new_instant - instant).as_secs_f32());
+            instant = new_instant;
+            println!("AVG MSPT: {}", ((sum).as_secs_f32() * 1000.0) / 60.0);
+            sum = Duration::new(0, 0);
             println!("TANKS {:?}", server.last_state.tanks.list);
             println!("TANK_BULLETS: {:?}", server.last_state.tank_bullets.list);
             //println!("BULLETS: {:?}", server.last_state.bullets.list);
@@ -103,6 +116,8 @@ pub fn run_server() {
         }
         let ser = Arc::new(serialize(&server.last_state));
         while let Err(_) = send.send(ser.clone()) {}
+        let loop_end = Instant::now();
+        sum += (loop_end - loop_time);
         // delay to 60 ups
         rt.block_on(interval.tick());
     }
@@ -118,7 +133,7 @@ async fn ws_server(
         move |ws: warp::ws::Ws| {
             let server_input = server_input.clone();
             let watch = watch.clone();
-            ws.on_upgrade(move |websocket| handle_client(websocket, server_input, watch))
+            ws.max_send_queue(2).on_upgrade(move |websocket| handle_client(websocket, server_input, watch))
         }
     });
     warp::serve(routes).run(addr).await;

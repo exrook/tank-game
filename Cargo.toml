@@ -7,12 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rstar = { version = "0.8.2", features = ["serde"] }
+rstar = { version = "0.8.2", features = ["serde", "euclid"] }
 tokio = {version = "1.4", features = ["sync", "rt", "rt-multi-thread", "time"]}
 parking_lot = "0.11"
 warp = { version = "0.3", features = ["websocket"], optional = true }
 tokio-tungstenite = "0.14"
-futures = "0.3.13"
+futures = { version = "0.3.13", features = ["bilock"] }
 serde = {version = "1.0.124", features = ["derive"]}
 rmp-serde = "0.15.4"
 pathfinder_canvas = {version = "0.5.0", optional = true}
@@ -25,15 +25,23 @@ pixels = {version = "0.2", optional = true}
 winit = {version = "0.24", optional = true}
 winit_input_helper = { version = "0.9", optional = true}
 raqote = { version = "0.7.4", optional = true }
-euclid = { version = "0.20"}
+euclid = { version = "0.20", features = ["serde"] }
+minifb = { version = "0.19", optional = true }
+druid-shell = { version = "0.7", optional = true }
 
 [features]
 server = ["warp"]
-pixels_backend = ["pixels", "winit", "winit_input_helper", "raqote"]
+druid_backend = ["druid-shell"]
+raqote_backend = ["raqote"]
+minifb_backend = ["minifb", "raqote_backend"]
+pixels_backend = ["pixels", "winit", "winit_input_helper", "raqote_backend"]
 pathfinder_backend = ["pathfinder_canvas", "pathfinder_gl", "pathfinder_resources", "pathfinder_renderer", "glutin", "gl", "pixels"]
+all_backends = ["druid_backend", "minifb_backend", "pixels_backend"]
 client = []
-client_default = ["client", "pixels_backend"]
-default = ["server", "client_default"]
+#client_default = ["client", "minifb_backend"]
+#default = ["server", "client_default"]
+default = ["server", "client", "minifb_backend"]
 
 [patch.crates-io]
 pixels = { git = "https://github.com/parasyte/pixels" }
+rstar = { path = "../rstar/rstar" }
